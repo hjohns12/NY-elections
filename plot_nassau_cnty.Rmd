@@ -1,0 +1,234 @@
+---
+title: "Nassau and Onongada Plots"
+author: "Hope Johnson and Hannah Wheelan"
+date: "8/8/2019"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(skimr)
+library(lubridate)
+library(magrittr)
+path <- file.path("/Users","hopecj", "projects", "NY")
+
+```
+
+## Read and munge data
+
+Notice the two parameters in the munge function: "alt_dvoteshare" and "filter_zero". Turning these options on will change results significantly. As-is, we calculate Democratic voteshare as $D votes = D votes \div Total Votes$. Alternatively, one could calculate $D votes = \frac{D votes}{(D votes + R votes)}$. Filtering out district-years where there were zero votes for a Democrat or Republican candidate was not done for either counties. 
+
+```{r cleaner data}
+# this function requires the following columns:
+#  "Year", "District", "D.Voteshare"
+
+# default D_voteshare for Onondaga cnty is D.voteshare = Dvotes/total votes
+
+
+# alt_dvoteshare is binary, if "TRUE" then D.voteshare = D/(D + R)
+# filter_zero is binary, removes uncontested races (do this thoughtfully!)
+# redistrict_start is a date like "2011", and sets the variable "pre_redistricting" to 1 BEFORE (not incl.) that date
+# impute_zero assumes a fraction of some number for uncontested races (default is .25)
+clean_file <- function(path, alt_dvoteshare = FALSE, filter_zero = FALSE, 
+                       redistrict_start, impute_zero = .25) {
+  dat <- read.csv(path)
+  if (filter_zero) {
+    dat %<>%
+      filter(Dem.Votes != 0,
+             GOP.Votes != 0)
+  }
+  if (alt_dvoteshare) {
+    dat$D.Voteshare <- dat$D.Voteshare2
+  }
+  dat$Year <- lubridate::ymd(dat$Year, truncated = 2L)
+  # create indicator for pre/post-redistricting
+  pre_redist <- lubridate::ymd(redistrict_start, truncated = 2L) - years(1)
+  pre_redist_span <- c(seq(min(dat$Year), pre_redist, by = "years"))
+  dat$pre_redistricting <- ifelse(dat$Year %in% pre_redist_span, 1, 0)
+  
+  # for races where there was no democratic candidate, give Dem voteshare `impute_zero` 
+  # for races wher there was no gop candidate, give Dem voteshare (1 - `impute_zero`)
+  # 25% is default, 0% means no change from actual results
+  dat$D.Voteshare <- ifelse(dat$D.Voteshare == 0, impute_zero, 
+                            ifelse(dat$D.Voteshare == 1, (1 - impute_zero), dat$D.Voteshare))
+  
+  ds_1 <- do.call(rbind, lapply(split(dat, dat$District), function(d) {
+  data.frame(mean = mean(d$D.Voteshare), sd = sd(d$D.Voteshare), District = d$District)
+  }))
+  ds_2 <- ds_1 %>%
+    group_by(District) %>%
+    add_tally()
+  
+  ds <- ds_2 %>%
+    mutate(se = sd/sqrt(n))
+  
+  ds_tomerge <- distinct(ds)
+  
+  dat %<>%
+    left_join(ds_tomerge, by = "District")
+  
+  return(dat)
+}
+```
+
+# Nassau County 
+
+```{r}
+n_path <- file.path(path, "raw nassau", "Nassau_County_Legislature_Election_Results.csv")
+dat <- clean_file(n_path, redistrict_start = "2013")
+skim(dat)
+```
+
+What is the average two-party voteshare in Nassau County (across all districts)?
+
+```{r}
+dat %>%
+  group_by(Year) %>%
+  skim(Party, D.Voteshare)
+```
+
+
+
+### Dem Voteshare by District
+
+A Dem voteshare close to 50% before redistricting, and far below or above 50% after redistricting, might point to packing or cracking. 
+
+- District 5!
+- District 3
+- District 7
+- District 19
+
+```{r echo=FALSE, include=FALSE}
+# NOT a CONFIDENCE INTERVAL, JUST MEAN ± SD
+ggplot() +
+  geom_point(data = dat, aes(District, mean), colour = 'grey', size = 2) +
+  geom_errorbar(
+    data = dat,
+    aes(District, mean, ymin = mean - sd, ymax = mean + sd), # NOT a conf. int, 
+    colour = 'grey',
+    width = 0.4
+  ) + 
+  geom_point(data = dat, aes(District, D.Voteshare, colour = factor(pre_redistricting))) +
+  scale_x_continuous(breaks = 1:20) + 
+  labs(y = "D Voteshare")
+```
+
+```{r warning=FALSE}
+# 95% CONFIDENCE INTERVAL
+ggplot() +
+  geom_point(data = dat, aes(District, mean), colour = 'grey', size = 2) +
+  geom_errorbar(
+    data = dat,
+    aes(District, mean, ymin = mean - 1.96*se, ymax = mean + 1.96*se), 
+    colour = 'grey',
+    width = 0.4
+  ) + 
+  geom_point(data = dat, aes(District, D.Voteshare, colour = factor(pre_redistricting))) +
+  scale_x_continuous(breaks = 1:20) + 
+  labs(y = "D Voteshare", title = "Nassau County Democratic Voteshare by District") + 
+  scale_color_manual(name="Pre-redistricting", 
+                        labels = c("No", 
+                                   "Yes"), 
+                        values = c("0"="lightblue", 
+                                   "1"="orange"))
+
+```
+
+
+### Dem Voteshare Over Time
+
+Re-districting happened in 2011 in Nassau County.
+
+```{r}
+break.vec <- seq(from = as.Date("2009-01-01"), to = as.Date("2017-01-01"),
+                 by = "2 years")
+
+dat %>%
+  filter(se > 0.03026350) %>%
+  ggplot() + 
+  geom_point(aes(Year, D.Voteshare, colour = factor(District))) + 
+  scale_x_date(breaks = break.vec, date_labels = "%Y") + 
+  geom_hline(yintercept = .5) + 
+  geom_line(aes(Year, D.Voteshare, colour = factor(District)), linetype = 2) + 
+  labs(colour="District", 
+       title = "Democratic Voteshare Over Time in Nassau County", 
+       subtitle = "(showing districts with std. error > 0.03)") 
+```
+
+
+# Onondaga County 
+
+```{r}
+# NB: in onongada county, D.Voteshare is calculated by (D Votes/TOTAL VOTES) here
+#     
+o_path <- file.path(path, "raw onondaga", "Onondaga County Legislature.csv")
+o_dat <- clean_file(o_path, redistrict_start = "2011", alt_dvoteshare = TRUE)
+skim(o_dat) 
+```
+What is the average two-party voteshare in Onondaga County (across all districts)?
+
+```{r}
+o_dat %>%
+  group_by(Year) %>%
+  skim(Party, D.Voteshare)
+```
+
+A word of caution for the Onondaga results. There are some peculiarities in the data, perhaps due to re-districting (post-2009).
+
+```{r}
+o_dat %>% 
+  filter(District %in% c(1, 2)) %>% 
+  arrange(District) %>%
+  select(District, Year, D.Voteshare)
+```
+
+### Dem Voteshare by District
+
+```{r warning=FALSE}
+# 95% CONFIDENCE INTERVAL
+ggplot() +
+  geom_point(data = o_dat, aes(District, mean), colour = 'grey', size = 2) +
+  geom_errorbar(
+    data = o_dat,
+    aes(District, mean, ymin = mean - 1.96*se, ymax = mean + 1.96*se), 
+    colour = 'grey',
+    width = 0.4
+  ) + 
+  geom_point(data = o_dat, aes(District, D.Voteshare, colour = factor(pre_redistricting))) +
+  scale_x_continuous(breaks = 1:19) + 
+  labs(y = "D Voteshare", title = "Onondaga County Democratic Voteshare by District") + 
+  scale_color_manual(name="Pre-redistricting", 
+                        labels = c("No", 
+                                   "Yes"), 
+                        values = c("0"="lightblue", 
+                                   "1"="orange"))
+
+
+```
+
+### Dem Voteshare Over Time
+
+```{r}
+break.vec <- seq(from = as.Date("2009-01-01"), to = as.Date("2017-01-01"),
+                 by = "2 years")
+
+o_dat %>%
+  filter(se >0.048648) %>%
+  ggplot() + 
+  geom_point(aes(Year, D.Voteshare, colour = factor(District))) + 
+  scale_x_date(breaks = break.vec, date_labels = "%Y") + 
+  geom_hline(yintercept = .5) + 
+  geom_line(aes(Year, D.Voteshare, colour = factor(District)), linetype = 2) + 
+  labs(colour="District", 
+       title = "Democratic Voteshare Over Time in Onondaga County", 
+       subtitle = "(showing districts with std. error > 0.048)") 
+```
+
